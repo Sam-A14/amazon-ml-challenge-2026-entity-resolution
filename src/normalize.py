@@ -12,6 +12,8 @@ unchanged on countries not seen in training (France).
 import re
 import unicodedata
 
+from .translit import skeleton_word, transliterate
+
 _DIGIT_LETTER = re.compile(r"(?<=\d)(?=[^\W\d_])|(?<=[^\W\d_])(?=\d)")
 _NON_WORD = re.compile(r"[\W_]+", re.UNICODE)
 _NULLS = {"null", "nan", "none"}
@@ -22,6 +24,9 @@ def clean_tokens(text) -> list:
     if not isinstance(text, str) or not text:
         return []
     s = text.lower()
+    if not s.isascii():
+        # Indian scripts -> latin first (before accent stripping removes their vowel signs)
+        s = transliterate(unicodedata.normalize("NFC", s))
     if not s.isascii():
         s = unicodedata.normalize("NFKD", s)
         s = "".join(ch for ch in s if not unicodedata.combining(ch))
@@ -56,3 +61,15 @@ def name_block_tokens(name) -> list:
 def addr_block_tokens(addr) -> list:
     """Blocking keys from an address: its distinct normalized words/numbers."""
     return list(set(clean_tokens(addr)))
+
+
+def name_skeleton(tokens) -> list:
+    """Phonetic skeletons of the alphabetic name tokens (see translit.skeleton_word)."""
+    out = []
+    for t in tokens:
+        if t.isdigit():
+            continue
+        sk = skeleton_word(t)
+        if sk:
+            out.append(sk)
+    return out

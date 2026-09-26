@@ -10,14 +10,14 @@ import numpy as np
 from rapidfuzz import fuzz
 from rapidfuzz.distance import JaroWinkler
 
-from .normalize import clean_tokens
+from .normalize import clean_tokens, name_skeleton
 
 STRING_FEATURES = [
     "name_ratio", "name_tsort", "name_tset", "name_partial", "name_jw", "name_jacc",
     "name_contain", "sq_eq", "sq_contain", "sq_ratio", "n_tok1", "n_tok2", "name2_nonascii",
     "addr_ratio", "addr_tset", "addr_partial", "addr_jacc", "addr_contain2", "addr1_empty",
     "addr2_empty", "num_shared", "first_num_eq", "first_num_prefix", "a_tok1", "a_tok2",
-    "name_in_addr2",
+    "name_in_addr2", "sk_ratio", "sk_tset", "sk_jacc",
 ]
 CONTEXT_FEATURES = ["src", "score", "fwd_rank", "rev_rank", "s1_best", "n_cands_s1", "r_best",
                     "n_cands_r", "r_second", "s1_gap", "s1_ratio", "r_gap", "r_margin"]
@@ -37,6 +37,9 @@ def _pair(n1, a1, n2, a2):
     inter_n = len(set1 & set2)
     inter_a = len(aset1 & aset2)
     short, long_ = (q1, q2) if len(q1) <= len(q2) else (q2, q1)
+    k1, k2 = name_skeleton(t1), name_skeleton(t2)
+    ks1, ks2 = " ".join(k1), " ".join(k2)
+    kset1, kset2 = set(k1), set(k2)
     f1 = num1[0] if num1 else ""
     f2 = num2[0] if num2 else ""
     return (
@@ -51,6 +54,8 @@ def _pair(n1, a1, n2, a2):
         len(set(num1) & set(num2)), float(bool(f1) and f1 == f2),
         float(bool(f1) and bool(f2) and f1 != f2 and (f1.startswith(f2) or f2.startswith(f1))),
         len(u1), len(u2), len(set1 & aset2) / max(len(set1), 1),
+        fuzz.ratio(ks1, ks2), fuzz.token_set_ratio(ks1, ks2),
+        len(kset1 & kset2) / max(len(kset1 | kset2), 1),
     )
 
 

@@ -38,7 +38,7 @@ def main():
     ap.add_argument("--m", type=int, default=2, help="reverse filter: S1s kept per S2/S3 record")
     ap.add_argument("--max-df", type=int, default=5000, help="cap for single-word keys")
     ap.add_argument("--max-df-pair", type=int, default=5000, help="cap for word-pair keys")
-    ap.add_argument("--chunk", type=int, default=500)
+    ap.add_argument("--chunk", type=int, default=250)
     ap.add_argument("--cache-dir", default="cache")
     ap.add_argument("--n-train", type=int, default=150_000, help="train S1 entities per country")
     ap.add_argument("--n-val", type=int, default=50_000, help="validation S1 entities per country")

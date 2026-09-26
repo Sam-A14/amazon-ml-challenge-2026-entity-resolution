@@ -14,6 +14,7 @@ Per country (records never match across countries in the training data):
      (EDA: no S2/S3 record belongs to more than one S1 entity).
 Raw hashed matrices are cached on disk so repeated experiments skip tokenization.
 """
+import gc
 import time
 from itertools import combinations
 from pathlib import Path
@@ -23,10 +24,11 @@ import scipy.sparse as sp
 from sklearn.feature_extraction import FeatureHasher
 from sklearn.preprocessing import normalize
 
-from .normalize import clean_tokens
+from .normalize import clean_tokens, name_skeleton
 
 N_FEATURES = 2 ** 22
-KINDS = ("nu", "np", "au", "ab")
+KINDS = ("nu", "np", "au", "ab", "sk")
+KEY_VERSION = "v4"          # bump when key generation changes (invalidates cache)
 MAX_NAME_WORDS_FOR_PAIRS = 6
 
 
@@ -43,13 +45,22 @@ def record_keys(name, addr):
         nu.add("".join(nt))
     if len(nt) >= 3:
         nu.add("".join(nt[:-1]))
+        nu.add("".join(nt[:2]))                      # prefix squash: "pkmedia.com"
+    if len(nt) >= 4:
+        nu.add("".join(nt[:3]))
     npairs = {"|".join(sorted(p)) for p in combinations(uniq[:MAX_NAME_WORDS_FOR_PAIRS], 2)}
+    # phonetic skeleton keys: link transliterated (Indian-script) names and typos
+    sk_words = list(dict.fromkeys(name_skeleton(nt)))
+    sk = set(sk_words)
+    sk.update("|".join(sorted(p)) for p in combinations(sk_words[:MAX_NAME_WORDS_FOR_PAIRS], 2))
+    if len(sk_words) >= 2:
+        sk.add("#" + "".join(sk_words))
     au, ab = set(), set()
     for comp in (addr or "").split(","):
         ct = clean_tokens(comp)
         au.update(ct)
         ab.update(f"{a}_{b}" for a, b in zip(ct, ct[1:]))
-    return nu, npairs, au, ab
+    return nu, npairs, au, ab, sk
 
 
 def _raw_matrices(df, batch=100_000):
@@ -77,7 +88,7 @@ def _raw_matrices(df, batch=100_000):
 def _cached_raw(df, cache_path):
     if cache_path is None:
         return _raw_matrices(df)
-    paths = {k: Path(f"{cache_path}_{k}.npz") for k in KINDS}
+    paths = {k: Path(f"{cache_path}_{KEY_VERSION}_{k}.npz") for k in KINDS}
     if all(p.exists() for p in paths.values()):
         mats = {k: sp.load_npz(p).tocsr() for k, p in paths.items()}
         if all(m.shape[0] == len(df) for m in mats.values()):
@@ -127,9 +138,10 @@ def _topk_rows(c, k):
     return rows[keep], c.indices[keep].astype(np.int64), c.data[keep]
 
 
-def retrieve(q, r, k, chunk=500, label="", rows_idx=None):
+def retrieve(q, r, k, chunk=250, label="", rows_idx=None):
     """Top-k columns of q @ r.T for every row of q (or only the rows in rows_idx)."""
     rt = r.T.tocsr()
+    del r
     rows_idx = np.arange(q.shape[0]) if rows_idx is None else np.asarray(rows_idx)
     out_r, out_c, out_s = [], [], []
     t0 = time.time()
@@ -155,18 +167,21 @@ def rank_within(groups, scores):
     return rank
 
 
-def retrieve_all(s1, s2, s3, k, max_df, chunk=500, cache_prefix=None, rows_idx=None):
+def retrieve_all(s1, s2, s3, k, max_df, chunk=250, cache_prefix=None, rows_idx=None):
     """Top-k S2 and top-k S3 candidates per S1 row. rid indexes concat(s2, s3)."""
     mats = build_matrices({"s1": s1, "s2": s2, "s3": s3}, max_df, cache_prefix)
-    a2, b2, c2 = retrieve(mats["s1"], mats["s2"], k, chunk, "S2", rows_idx)
-    a3, b3, c3 = retrieve(mats["s1"], mats["s3"], k, chunk, "S3", rows_idx)
-    del mats
+    q = mats.pop("s1")
+    a2, b2, c2 = retrieve(q, mats.pop("s2"), k, chunk, "S2", rows_idx)   # pop: free after use
+    gc.collect()
+    a3, b3, c3 = retrieve(q, mats.pop("s3"), k, chunk, "S3", rows_idx)
+    del q, mats
+    gc.collect()
     return (np.concatenate([a2, a3]), np.concatenate([b2, b3 + len(s2)]),
             np.concatenate([c2, c3]).astype(np.float32),
             np.concatenate([np.zeros(a2.size, np.int8), np.ones(a3.size, np.int8)]))
 
 
-def generate_candidates(s1, s2, s3, k, m, max_df, chunk=500, cache_prefix=None):
+def generate_candidates(s1, s2, s3, k, m, max_df, chunk=250, cache_prefix=None):
     """Final candidate set for one country (DataFrame with context features)."""
     import pandas as pd
     s1i, rid, score, src = retrieve_all(s1, s2, s3, k, max_df, chunk, cache_prefix)
@@ -206,5 +221,5 @@ def filter_candidates(s1, rid, score, fwd_rank, k, m):
 
 
 def max_df_dict(uni, pair):
-    """Per-kind df caps: single words vs word pairs."""
-    return {"nu": uni, "au": uni, "np": pair, "ab": pair}
+    """Per-kind df caps: single words vs word pairs (skeleton keys use the pair cap)."""
+    return {"nu": uni, "au": uni, "np": pair, "ab": pair, "sk": pair}

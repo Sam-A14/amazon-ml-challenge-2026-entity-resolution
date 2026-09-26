@@ -42,7 +42,7 @@ def main():
     ap.add_argument("--max-k", type=int, default=20)
     ap.add_argument("--max-df", type=int, default=5000, help="cap for single-word keys")
     ap.add_argument("--max-df-pair", type=int, default=5000, help="cap for word-pair keys")
-    ap.add_argument("--chunk", type=int, default=500)
+    ap.add_argument("--chunk", type=int, default=250)
     ap.add_argument("--cache-dir", default="cache")
     ap.add_argument("--out", default="experiments/blocking_results.txt")
     args = ap.parse_args()
@@ -52,6 +52,9 @@ def main():
     gt = load_ground_truth(args.data_dir)
     print(f"loaded in {time.time() - t0:.0f}s", flush=True)
     countries = args.countries or countries_of(s1_all, s2_all, s3_all)
+    # keep only the requested countries in memory
+    s1_all, s2_all, s3_all = (f[f["country"].isin(countries)] for f in (s1_all, s2_all, s3_all))
+    gt = gt[gt["source1_entity_id"].isin(s1_all["entity_id"])]
     max_df = max_df_dict(args.max_df, args.max_df_pair)
 
     lines = [f"\n##### max_df={args.max_df} max_df_pair={args.max_df_pair} sample={args.sample}"]
