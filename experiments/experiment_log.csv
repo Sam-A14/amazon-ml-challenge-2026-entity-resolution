@@ -1,0 +1,2 @@
+time,k,m,max_df,n_train,n_val,threshold,val_macro_f05,precision,recall,ceiling,blocking,note
+2026-09-26T21:59,8,2,1000,150000,50000,0.6,0.7932,0.9832,0.647,0.8147,"[('India', np.float64(0.6555748121717356), 5.97997481849844), ('US', np.float64(0.6779746826596006), 6.305914857063854)]",
