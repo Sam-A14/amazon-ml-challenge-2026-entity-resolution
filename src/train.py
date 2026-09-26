@@ -40,6 +40,7 @@ def main():
     ap.add_argument("--max-df-pair", type=int, default=5000, help="cap for word-pair keys")
     ap.add_argument("--chunk", type=int, default=250)
     ap.add_argument("--cache-dir", default="cache")
+    ap.add_argument("--rev-m", type=int, default=0, help="reverse search: S1s per S2/S3 record")
     ap.add_argument("--n-train", type=int, default=150_000, help="train S1 entities per country")
     ap.add_argument("--n-val", type=int, default=50_000, help="validation S1 entities per country")
     ap.add_argument("--countries", nargs="*", default=None)
@@ -64,7 +65,7 @@ def main():
         print(f"\n== {country}: S1={len(s1):,} S2+S3={len(rec):,}", flush=True)
         cand = generate_candidates(s1, s2, s3, args.k, args.m,
                                    max_df_dict(args.max_df, args.max_df_pair), args.chunk,
-                                   f"{args.cache_dir}/train_{safe(country)}")
+                                   f"{args.cache_dir}/train_{safe(country)}", rev_m=args.rev_m)
 
         g = gt[gt["source1_entity_id"].isin(s1["entity_id"])]
         g1 = index_of(s1["entity_id"], g["source1_entity_id"])
@@ -130,7 +131,7 @@ def main():
 
     md = Path(args.model_dir); md.mkdir(parents=True, exist_ok=True)
     booster.save_model(str(md / "lgbm.txt"), num_iteration=booster.best_iteration)
-    cfg = dict(k=args.k, m=args.m, max_df=args.max_df, max_df_pair=args.max_df_pair, chunk=args.chunk, threshold=t,
+    cfg = dict(k=args.k, m=args.m, rev_m=args.rev_m, max_df=args.max_df, max_df_pair=args.max_df_pair, chunk=args.chunk, threshold=t,
                features=FEATURES, val_macro_f05=f, val_precision=p, val_recall=r,
                val_ceiling=ceiling, blocking=block_stats)
     (md / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")

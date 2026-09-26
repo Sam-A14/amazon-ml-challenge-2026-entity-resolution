@@ -68,8 +68,8 @@ def main():
         if 0 < args.sample < len(s1):
             rows = np.sort(np.random.default_rng(0).choice(len(s1), args.sample, replace=False))
 
-        s1i, rid, score, src = retrieve_all(s1, s2, s3, args.max_k, max_df, args.chunk,
-                                            f"{args.cache_dir}/train_{safe(country)}", rows)
+        s1i, rid, score, src, _ = retrieve_all(s1, s2, s3, args.max_k, max_df, args.chunk,
+                                               f"{args.cache_dir}/train_{safe(country)}", rows)
         fwd = rank_within(s1i * 2 + src, score)
 
         g = gt[gt["source1_entity_id"].isin(s1["entity_id"])]

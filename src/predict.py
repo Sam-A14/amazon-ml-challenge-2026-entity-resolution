@@ -49,7 +49,8 @@ def main():
             continue
         cand = generate_candidates(s1, s2, s3, cfg["k"], cfg["m"],
                                    max_df_dict(cfg["max_df"], cfg.get("max_df_pair", cfg["max_df"])),
-                                   cfg["chunk"], f"{args.cache_dir}/{args.split}_{safe(country)}")
+                                   cfg["chunk"], f"{args.cache_dir}/{args.split}_{safe(country)}",
+                                   rev_m=cfg.get("rev_m", 0))
         tf = time.time()
         X = build_features(cand, s1, rec)
         prob = booster.predict(X)

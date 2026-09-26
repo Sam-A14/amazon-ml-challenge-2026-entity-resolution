@@ -28,12 +28,22 @@ from .normalize import clean_tokens, name_skeleton
 
 N_FEATURES = 2 ** 22
 KINDS = ("nu", "np", "au", "ab", "sk")
-KEY_VERSION = "v4"          # bump when key generation changes (invalidates cache)
+KEY_VERSION = "v5"          # bump when key generation changes (invalidates cache)
 MAX_NAME_WORDS_FOR_PAIRS = 6
 
 
-def record_keys(name, addr):
-    """Blocking keys of one record, by kind."""
+def _has_indic(text):
+    return isinstance(text, str) and any(0x0900 <= ord(c) < 0x0D80 for c in text)
+
+
+def record_keys(name, addr, query=True):
+    """Blocking keys of one record, by kind.
+
+    query=True  (Source 1): all keys, incl. prefix squashes and phonetic skeleton keys.
+    query=False (Source 2/3): skeleton keys only if the name is written in an Indian script.
+    A candidate's ranking for a query depends only on the candidate's own keys, so ordinary
+    Latin-script candidates keep exactly the v3 representation (no dilution), while
+    transliterated names gain a route to their Source 1 record."""
     nt = clean_tokens(name)
     seen, uniq = set(), []
     for t in nt:
@@ -45,12 +55,13 @@ def record_keys(name, addr):
         nu.add("".join(nt))
     if len(nt) >= 3:
         nu.add("".join(nt[:-1]))
-        nu.add("".join(nt[:2]))                      # prefix squash: "pkmedia.com"
-    if len(nt) >= 4:
+        if query:
+            nu.add("".join(nt[:2]))                  # prefix squash: "pkmedia.com"
+    if query and len(nt) >= 4:
         nu.add("".join(nt[:3]))
     npairs = {"|".join(sorted(p)) for p in combinations(uniq[:MAX_NAME_WORDS_FOR_PAIRS], 2)}
     # phonetic skeleton keys: link transliterated (Indian-script) names and typos
-    sk_words = list(dict.fromkeys(name_skeleton(nt)))
+    sk_words = list(dict.fromkeys(name_skeleton(nt))) if (query or _has_indic(name)) else []
     sk = set(sk_words)
     sk.update("|".join(sorted(p)) for p in combinations(sk_words[:MAX_NAME_WORDS_FOR_PAIRS], 2))
     if len(sk_words) >= 2:
@@ -63,7 +74,7 @@ def record_keys(name, addr):
     return nu, npairs, au, ab, sk
 
 
-def _raw_matrices(df, batch=100_000):
+def _raw_matrices(df, batch=100_000, query=True):
     """Binary hashed matrices (one per key kind) for a frame of records.
     Keys are generated in batches so only `batch` records' key sets are in memory at once."""
     h = FeatureHasher(n_features=N_FEATURES, input_type="string",
@@ -72,7 +83,7 @@ def _raw_matrices(df, batch=100_000):
     addrs = df["business_address"].to_numpy()
     parts = {kind: [] for kind in KINDS}
     for s in range(0, len(df), batch):
-        keys = [record_keys(n, a) for n, a in zip(names[s:s + batch], addrs[s:s + batch])]
+        keys = [record_keys(n, a, query) for n, a in zip(names[s:s + batch], addrs[s:s + batch])]
         for i, kind in enumerate(KINDS):
             parts[kind].append(h.transform(k[i] for k in keys).tocsr())
         del keys
@@ -85,15 +96,15 @@ def _raw_matrices(df, batch=100_000):
     return out
 
 
-def _cached_raw(df, cache_path):
+def _cached_raw(df, cache_path, query=True):
     if cache_path is None:
-        return _raw_matrices(df)
+        return _raw_matrices(df, query=query)
     paths = {k: Path(f"{cache_path}_{KEY_VERSION}_{k}.npz") for k in KINDS}
     if all(p.exists() for p in paths.values()):
         mats = {k: sp.load_npz(p).tocsr() for k, p in paths.items()}
         if all(m.shape[0] == len(df) for m in mats.values()):
             return mats
-    mats = _raw_matrices(df)
+    mats = _raw_matrices(df, query=query)
     Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
     for k, p in paths.items():
         sp.save_npz(p, mats[k], compressed=False)
@@ -105,7 +116,8 @@ def build_matrices(recs_by_source, max_df, cache_prefix=None, weights=None):
     Returns dict src -> L2-normalized IDF-weighted sparse matrix."""
     weights = weights or {}
     t0 = time.time()
-    raw = {s: _cached_raw(df, None if cache_prefix is None else f"{cache_prefix}_{s}")
+    raw = {s: _cached_raw(df, None if cache_prefix is None else f"{cache_prefix}_{s}",
+                          query=(s == "s1"))
            for s, df in recs_by_source.items()}
     print(f"  keys ready {time.time() - t0:.0f}s", flush=True)
     n_docs = sum(len(df) for df in recs_by_source.values())
@@ -167,28 +179,46 @@ def rank_within(groups, scores):
     return rank
 
 
-def retrieve_all(s1, s2, s3, k, max_df, chunk=250, cache_prefix=None, rows_idx=None):
-    """Top-k S2 and top-k S3 candidates per S1 row. rid indexes concat(s2, s3)."""
+def retrieve_all(s1, s2, s3, k, max_df, chunk=250, cache_prefix=None, rows_idx=None,
+                 rev_m=0, rev_chunk=1000):
+    """Forward: top-k S2 and top-k S3 candidates per S1 row.
+    Reverse (rev_m > 0): for every S2/S3 record, its top-rev_m S1 records (each S2/S3 record
+    belongs to at most one S1 entity, so its own best S1 matches are strong candidates even
+    when it is crowded out of that S1's forward top-k).
+    Returns (s1i, rid, score, src, is_fwd); rid indexes concat(s2, s3)."""
     mats = build_matrices({"s1": s1, "s2": s2, "s3": s3}, max_df, cache_prefix)
     q = mats.pop("s1")
-    a2, b2, c2 = retrieve(q, mats.pop("s2"), k, chunk, "S2", rows_idx)   # pop: free after use
-    gc.collect()
-    a3, b3, c3 = retrieve(q, mats.pop("s3"), k, chunk, "S3", rows_idx)
+    parts = []
+    for src, name, off in ((0, "s2", 0), (1, "s3", len(s2))):
+        r = mats.pop(name)
+        a, b, c = retrieve(q, r, k, chunk, name.upper(), rows_idx)
+        parts.append((a, b + off, c, np.full(a.size, src, np.int8), np.ones(a.size, bool)))
+        if rev_m:
+            ra, rb, rc = retrieve(r, q, rev_m, rev_chunk, name.upper() + "-rev")
+            parts.append((rb, ra + off, rc, np.full(ra.size, src, np.int8), np.zeros(ra.size, bool)))
+        del r
+        gc.collect()
     del q, mats
     gc.collect()
-    return (np.concatenate([a2, a3]), np.concatenate([b2, b3 + len(s2)]),
-            np.concatenate([c2, c3]).astype(np.float32),
-            np.concatenate([np.zeros(a2.size, np.int8), np.ones(a3.size, np.int8)]))
+    s1i, rid, score, srcs, fwd = (np.concatenate([p[i] for p in parts]) for i in range(5))
+    return s1i, rid, score.astype(np.float32), srcs, fwd
 
 
-def generate_candidates(s1, s2, s3, k, m, max_df, chunk=250, cache_prefix=None):
-    """Final candidate set for one country (DataFrame with context features)."""
+def generate_candidates(s1, s2, s3, k, m, max_df, chunk=250, cache_prefix=None, rev_m=0):
+    """Final candidate set for one country (DataFrame with context features):
+    forward top-k pairs filtered by the reverse rank < m, united with the reverse top-rev_m."""
     import pandas as pd
-    s1i, rid, score, src = retrieve_all(s1, s2, s3, k, max_df, chunk, cache_prefix)
+    s1i, rid, score, src, fwd = retrieve_all(s1, s2, s3, k, max_df, chunk, cache_prefix,
+                                             rev_m=rev_m)
     if m is not None and s1i.size:
-        keep = rank_within(rid, score) < m
+        f = np.flatnonzero(fwd)
+        drop = f[rank_within(rid[f], score[f]) >= m]
+        keep = np.ones(s1i.size, bool)
+        keep[drop] = False
         s1i, rid, score, src = s1i[keep], rid[keep], score[keep], src[keep]
-    return add_context(pd.DataFrame({"s1i": s1i, "rid": rid, "src": src, "score": score}))
+    df = pd.DataFrame({"s1i": s1i, "rid": rid, "src": src, "score": score})
+    df = df.drop_duplicates(["s1i", "rid"]).reset_index(drop=True)
+    return add_context(df)
 
 
 def add_context(df):
