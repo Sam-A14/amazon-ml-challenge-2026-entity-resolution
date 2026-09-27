@@ -38,12 +38,13 @@ python -m src.predict --data-dir dataset --output output --cache-dir cache
 
 # 3. final model: adds house-number (+ name-frequency) features to the saved candidates,
 #    trains the final LightGBM, tunes the threshold, writes both output files  (~1 h)
-python -m src.augment --data-dir dataset --cache-dir cache --output output --baseline 0 FINAL_FLAGS
+python -m src.augment --data-dir dataset --cache-dir cache --output output --baseline 0
 
 # 4. official format check
 python utils/validate_submission.py --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv --test-dir dataset/test
 ~~~
-`FINAL_FLAGS` for the submitted version: SEE_FINAL_VERSION
+Step 3 as written reproduces the submitted **v10** model (house-number + name-frequency features).
+Add `--no-name-freq --model-dir models/v9` to reproduce v9 instead.
 
 ## Project structure
 ~~~
@@ -62,5 +63,5 @@ experiments/                    blocking_results.txt, experiment_log.csv
 ~~~
 
 ## Results (public leaderboard, macro F0.5)
-v1 0.813 → v3 0.925 → v6 0.953 → v9 0.964 (validation 0.9707). Details in `Documentation_template.md`.
+v1 0.813 → v3 0.925 → v6 0.953 → v9 0.964 → **v10 0.967** (validation 0.9727, final submission). Details in `Documentation_template.md`.
 Random seeds are fixed (split seed 42 + country index, LightGBM seed 42).

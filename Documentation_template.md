@@ -16,7 +16,7 @@ with a 0.985 macro-F0.5 ceiling. A LightGBM classifier (MIT licence; no pretrain
 data) scores pairs with string, competition, **house-number-relationship** and name-frequency features;
 matches are accepted above a threshold tuned on the official macro F0.5 and each Source 2/3 record is
 assigned to at most one Source 1 entity. Every change was driven by measured error analysis:
-public leaderboard 0.813 → 0.925 → 0.953 → **0.964**.
+public leaderboard 0.813 → 0.925 → 0.953 → 0.964 → **0.967** (validation macro F0.5 0.9727).
 
 ---
 
@@ -110,16 +110,20 @@ blocking misses included) after the one-owner rule (each S2/S3 record goes to it
 | v3 | word-pair keys, df cap 5,000 | 0.9363 | 0.9845 | 0.8722 | 0.925 |
 | v6 | transliteration + reverse search | 0.9648 | 0.9894 | 0.9261 | 0.953 |
 | v7 | 2× training data (not submitted) | 0.9608 | 0.9879 | 0.9193 | — |
-| **v9** | **house-number relationship features** | **0.9707** | **0.9929** | **0.9342** | **0.964** |
-| v10 | + name-frequency features | [TO FILL] | [TO FILL] | [TO FILL] | [TO FILL] |
+| v9 | house-number relationship features | 0.9707 | 0.9929 | 0.9342 | 0.964 |
+| **v10 (final)** | **+ name-frequency features** | **0.9727** | **0.9940** | **0.9371** | **0.967** |
+| v11 | second-stage (stacked) model on v10 features (not submitted) | 0.9729 | — | — | — |
 
-- **F_0.5 Score (macro):** 0.9707 validation / 0.964 public leaderboard (v9) [update if v10 is better].
+- **F_0.5 Score (macro):** 0.9727 validation / 0.967 public leaderboard (v10, final submission).
+- **Model errors on validation (v7 → v9 → v10):** rejected true pairs 13,113 → 7,938 → 6,926;
+  wrong merges accepted 3,889 → 2,315 → 1,963. The stacked second stage (v11) added only +0.0002
+  and was not submitted.
 - **Common false positives (wrong merges):** different businesses on the same street with nearby but
   unrelated house numbers (3004 vs 3013, 84D vs 88D), largely fixed by v9 (−40% wrong merges).
   Remaining: look-alike names with truncated numbers, and identical names without an address that
-  belong to a namesake.
+  belong to a namesake; random generated names sharing an address with a different business.
 - **Common false negatives (missed matches):** records with an empty S2/S3 address (35% of v9's model
-  misses, targeted by v10), unrelated generated names ("Halogild") with truncated numbers, heavy typos,
+  misses in v9, 37% in v10: many are genuinely ambiguous namesakes), unrelated generated names ("Halogild") with truncated numbers, heavy typos,
   plus ~1.5% of pairs never retrieved by blocking.
 
 ---

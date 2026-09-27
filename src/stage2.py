@@ -28,6 +28,7 @@ from .eval_blocking import safe
 from .evaluation import decide, macro_f05_fast
 from .submission import write_submission
 from .train import KEY_S1
+from .augment import add_for_keys, country_frames, extra_features, name_counts
 
 GROUP_FEATURES = ["p1", "p1_rank_s1", "p1_max_s1", "p1_gap_s1", "p1_n50_s1", "p1_sum_s1",
                   "p1_ratio_s1", "p1_second_s1"]
@@ -73,11 +74,11 @@ def main():
     ap.add_argument("--cache-dir", default="cache")
     ap.add_argument("--feat-dir", default=None)
     ap.add_argument("--output", default="output")
-    ap.add_argument("--model-dir", default="models/stage2")
+    ap.add_argument("--model-dir", default="models/v11")
     ap.add_argument("--folds", type=int, default=3)
     ap.add_argument("--s1-rounds", type=int, default=800)
-    ap.add_argument("--s2-rounds", type=int, default=3000)
-    ap.add_argument("--baseline", type=float, default=None,
+    ap.add_argument("--s2-rounds", type=int, default=4000)
+    ap.add_argument("--baseline", type=float, required=True,
                     help="validation F0.5 to beat (default: models/config.json val_macro_f05)")
     ap.add_argument("--no-predict", action="store_true", help="only report validation")
     args = ap.parse_args()
@@ -85,9 +86,15 @@ def main():
     t0 = time.time()
 
     z = np.load(feat_dir / "train_features.npz", allow_pickle=True)
-    Xtr, ytr, ktr = z["Xtr"], z["ytr"], z["ktr"]
-    Xva, yva, kva, rva, ents, gold = (z[n] for n in ("Xva", "yva", "kva", "rva", "ents", "gold"))
+    ytr, ktr = z["ytr"], z["ktr"]
+    yva, kva, rva, ents, gold = (z[n] for n in ("yva", "kva", "rva", "ents", "gold"))
     countries = [str(c) for c in z["countries"]]
+    # v10 features: base + house-number + name-frequency
+    _, _, _, frames = country_frames(args.data_dir, "train", countries)
+    Xtr = add_for_keys(z["Xtr"], ktr, z["rtr"], countries, frames)
+    Xva = add_for_keys(z["Xva"], kva, rva, countries, frames)
+    del frames, z
+    print(f"v10 features ready ({time.time() - t0:.0f}s)", flush=True)
     print(f"train pairs {len(ytr):,}  val pairs {len(yva):,}", flush=True)
 
     # ---- stage 1: cross-fitted probabilities -------------------------------------------
@@ -114,26 +121,33 @@ def main():
               feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1, num_threads=0,
               verbose=-1, seed=42)
     dtr = lgb.Dataset(np.hstack([Xtr, Gtr]), ytr)
+    XvaG = np.hstack([Xva, Gva])
     m2 = lgb.train(p2, dtr, num_boost_round=args.s2_rounds,
-                   valid_sets=[lgb.Dataset(np.hstack([Xva, Gva]), yva, reference=dtr)],
-                   callbacks=[lgb.early_stopping(100), lgb.log_evaluation(200)])
-    pva2 = m2.predict(np.hstack([Xva, Gva]), num_iteration=m2.best_iteration)
-    f2, pr2, rc2, t_glob, thresholds = tune(pva2, kva, rva, yva, ents, gold, countries)
+                   valid_sets=[lgb.Dataset(XvaG, yva, reference=dtr)],
+                   callbacks=[lgb.log_evaluation(250)])
+    del dtr
+    best = None
+    for it in range(1000, args.s2_rounds + 1, 1000):          # choose iteration by macro F0.5
+        res = tune(m2.predict(XvaG, num_iteration=it), kva, rva, yva, ents, gold, countries)
+        print(f"  stage-2 iteration {it}: F0.5 {res[0]:.4f}", flush=True)
+        if best is None or res[0] > best[0][0]:
+            best = (res, it)
+    (f2, pr2, rc2, t_glob, thresholds), best_it = best
     base = args.baseline
     if base is None:
         cfgp = Path("models/config.json")
         base = json.loads(cfgp.read_text())["val_macro_f05"] if cfgp.exists() else 0.0
-    print(f"\nSTAGE-2 validation macro F0.5 = {f2:.4f} (precision {pr2:.4f}, recall {rc2:.4f}); "
+    print(f"\nV11 (stage-2) validation macro F0.5 = {f2:.4f} (precision {pr2:.4f}, recall {rc2:.4f}); "
           f"single model = {base:.4f}; thresholds {thresholds or t_glob}", flush=True)
 
     md = Path(args.model_dir); md.mkdir(parents=True, exist_ok=True)
     for i, m in enumerate(models1):
         m.save_model(str(md / f"stage1_fold{i}.txt"))
-    m2.save_model(str(md / "stage2.txt"), num_iteration=m2.best_iteration)
+    m2.save_model(str(md / "stage2.txt"), num_iteration=best_it)
     (md / "config.json").write_text(json.dumps(dict(
         threshold=t_glob, thresholds=thresholds, val_macro_f05=f2, val_precision=pr2,
         val_recall=rc2, stage1_val_macro_f05=f1, folds=args.folds, s1_rounds=args.s1_rounds,
-        best_iteration=m2.best_iteration, group_features=GROUP_FEATURES), indent=2))
+        best_iteration=best_it, group_features=GROUP_FEATURES), indent=2))
     if args.no_predict:
         return
     if f2 <= base:
@@ -152,9 +166,12 @@ def main():
             print(f"  {country}: no saved features ({ff}) - run src.predict first")
             continue
         zt = np.load(ff)
-        s1i, rid, X = zt["s1i"], zt["rid"], zt["X"]
+        s1i, rid = zt["s1i"], zt["rid"]
+        nc = name_counts(s1["business_name"].to_numpy(), rec["business_name"].to_numpy())
+        X = np.hstack([zt["X"], extra_features(s1["business_address"].to_numpy(),
+                                               rec["business_address"].to_numpy(), s1i, rid, nc)])
         pt1 = np.mean([m.predict(X) for m in models1], axis=0)
-        pt2 = m2.predict(np.hstack([X, group_features(s1i, pt1)]), num_iteration=m2.best_iteration)
+        pt2 = m2.predict(np.hstack([X, group_features(s1i, pt1)]), num_iteration=best_it)
         thr = thresholds.get(str(country), t_glob)
         acc = decide(s1i, rid, pt2, thr)
         a = s1["entity_id"].to_numpy()[s1i]
