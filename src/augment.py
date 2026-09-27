@@ -32,6 +32,29 @@ from .train import KEY_R, KEY_S1
 
 NUM_FEATURES = ["r_nums", "s_nums", "n_exact", "n_affix", "n_near1", "n_other", "frac_other",
                 "log_min_diff_other", "log_first_absdiff", "first_rel"]
+# v10: name frequency - how many records share a name (decides records with no/thin address)
+FREQ_FEATURES = ["s1name_in_s1", "rname_in_s1", "rname_in_r", "s1name_in_r", "same_norm_name"]
+
+
+def norm_name(x):
+    return " ".join(clean_tokens(x))
+
+
+def name_counts(s1_names, rec_names):
+    """Normalized names and their frequencies among S1 and among S2+S3 of one country."""
+    n1 = pd.Series([norm_name(x) for x in s1_names])
+    nr = pd.Series([norm_name(x) for x in rec_names])
+    c1, cr = n1.value_counts(), nr.value_counts()
+    return n1.to_numpy(), nr.to_numpy(), c1, cr
+
+
+def freq_features(nc, i, j):
+    n1, nr, c1, cr = nc
+    a, b = n1[i], nr[j]
+    return np.column_stack([
+        pd.Series(a).map(c1).fillna(0).to_numpy(), pd.Series(b).map(c1).fillna(0).to_numpy(),
+        pd.Series(b).map(cr).fillna(0).to_numpy(), pd.Series(a).map(cr).fillna(0).to_numpy(),
+        (a == b).astype(np.float32)]).astype(np.float32)
 
 
 def numbers(addr):
@@ -76,8 +99,8 @@ def num_feats(a, b):
             np.log1p(mdo) if mdo >= 0 else -1.0, np.log1p(fa) if fa >= 0 else -1.0, fr)
 
 
-def extra_features(s1_addr, rec_addr, i, j):
-    """Number features for pairs (i, j) of one country; parses each address once."""
+def extra_features(s1_addr, rec_addr, i, j, nc=None):
+    """Number (+ name-frequency) features for pairs (i, j) of one country."""
     ui, ii = np.unique(i, return_inverse=True)
     uj, jj = np.unique(j, return_inverse=True)
     na = [numbers(x) for x in s1_addr[ui]]
@@ -85,20 +108,22 @@ def extra_features(s1_addr, rec_addr, i, j):
     out = np.empty((i.size, len(NUM_FEATURES)), dtype=np.float32)
     for n, (p, q) in enumerate(zip(ii, jj)):
         out[n] = num_feats(na[p], nb[q])
+    if nc is not None:
+        out = np.hstack([out, freq_features(nc, i, j)])
     return out
 
 
 def add_for_keys(X, k1, kr, countries, frames):
     """Append number features to X, rows identified by country-prefixed keys."""
-    E = np.zeros((X.shape[0], len(NUM_FEATURES)), dtype=np.float32)
+    E = np.zeros((X.shape[0], len(NUM_FEATURES) + len(FREQ_FEATURES)), dtype=np.float32)
     ci = k1 // KEY_S1
     for c, country in enumerate(countries):
         m = ci == c
         if not m.any():
             continue
-        s1a, reca = frames[country]
+        s1a, reca, nc = frames[country]
         E[m] = extra_features(s1a, reca, (k1[m] - c * KEY_S1).astype(np.int64),
-                              (kr[m] - c * KEY_R).astype(np.int64))
+                              (kr[m] - c * KEY_R).astype(np.int64), nc)
     return np.hstack([X, E])
 
 
@@ -108,7 +133,8 @@ def country_frames(data_dir, split, countries):
     for c in countries:
         s1 = s1a[s1a["country"] == c].reset_index(drop=True)
         rec = pd.concat([s2a[s2a["country"] == c], s3a[s3a["country"] == c]], ignore_index=True)
-        out[c] = (s1["business_address"].to_numpy(), rec["business_address"].to_numpy())
+        out[c] = (s1["business_address"].to_numpy(), rec["business_address"].to_numpy(),
+                  name_counts(s1["business_name"].to_numpy(), rec["business_name"].to_numpy()))
     return s1a, s2a, s3a, out
 
 
@@ -117,10 +143,12 @@ def main():
     ap.add_argument("--data-dir", default="dataset")
     ap.add_argument("--cache-dir", default="cache")
     ap.add_argument("--output", default="output")
-    ap.add_argument("--model-dir", default="models/v9")
+    ap.add_argument("--model-dir", default="models/v10")
     ap.add_argument("--baseline", type=float, required=True)
     ap.add_argument("--rounds", type=int, default=2000)
     ap.add_argument("--lr", type=float, default=0.05)
+    ap.add_argument("--no-name-freq", action="store_true",
+                    help="v9 variant: house-number features only (no name-frequency features)")
     args = ap.parse_args()
     fdir = Path(args.cache_dir) / "features"
     t0 = time.time()
@@ -130,9 +158,12 @@ def main():
     _, _, _, frames = country_frames(args.data_dir, "train", countries)
     Xtr = add_for_keys(z["Xtr"], z["ktr"], z["rtr"], countries, frames)
     Xva = add_for_keys(z["Xva"], z["kva"], z["rva"], countries, frames)
+    n_keep = z["Xtr"].shape[1] + len(NUM_FEATURES)
+    if args.no_name_freq:
+        Xtr, Xva = Xtr[:, :n_keep], Xva[:, :n_keep]
     ytr, yva, kva, rva, ents, gold = (z[n] for n in ("ytr", "yva", "kva", "rva", "ents", "gold"))
     del frames, z
-    names = FEATURES + NUM_FEATURES
+    names = FEATURES + NUM_FEATURES + ([] if args.no_name_freq else FREQ_FEATURES)
     print(f"number features added ({time.time() - t0:.0f}s); train {len(ytr):,} val {len(yva):,}",
           flush=True)
 
@@ -158,17 +189,17 @@ def main():
         print(f"  iteration {it}: best so far F0.5 {best[0]:.4f}", flush=True)
     f, it, t, pr, rc = best
     imp = sorted(zip(names, booster.feature_importance("gain")), key=lambda x: -x[1])
-    print(f"\nV9 validation macro F0.5 = {f:.4f} (precision {pr:.4f}, recall {rc:.4f}) "
+    print(f"\nV10 validation macro F0.5 = {f:.4f} (precision {pr:.4f}, recall {rc:.4f}) "
           f"at iteration {it}, threshold {t:.3f}; baseline {args.baseline:.4f}")
-    print("number-feature importance ranks:",
-          {n: r + 1 for r, (n, _) in enumerate(imp) if n in NUM_FEATURES})
+    print("new-feature importance ranks:",
+          {n: r + 1 for r, (n, _) in enumerate(imp) if n in NUM_FEATURES + FREQ_FEATURES})
 
     md = Path(args.model_dir); md.mkdir(parents=True, exist_ok=True)
     booster.save_model(str(md / "lgbm.txt"), num_iteration=it)
     (md / "config.json").write_text(json.dumps(dict(threshold=t, iteration=it, val_macro_f05=f,
         val_precision=pr, val_recall=rc, features=names), indent=2))
     if f <= args.baseline:
-        print("v9 does NOT beat the baseline -> not writing test predictions")
+        print("v10 does NOT beat the baseline -> not writing test predictions")
         return
 
     s1a, s2a, s3a = load_split(args.data_dir, "test")
@@ -183,8 +214,10 @@ def main():
             continue
         zt = np.load(ff)
         s1i, rid = zt["s1i"], zt["rid"]
+        nc = name_counts(s1["business_name"].to_numpy(), rec["business_name"].to_numpy())
         X = np.hstack([zt["X"], extra_features(s1["business_address"].to_numpy(),
-                                               rec["business_address"].to_numpy(), s1i, rid)])
+                                               rec["business_address"].to_numpy(), s1i, rid,
+                                               None if args.no_name_freq else nc)])
         prob = booster.predict(X, num_iteration=it)
         acc = decide(s1i, rid, prob, t)
         a = s1["entity_id"].to_numpy()[s1i]

@@ -27,13 +27,20 @@ def main():
     ap.add_argument("--cache-dir", default="cache")
     ap.add_argument("--model-dir", default="models")
     ap.add_argument("--n-show", type=int, default=20)
+    ap.add_argument("--v9", action="store_true", help="analyse the v9 model (models/v9, number features)")
     args = ap.parse_args()
 
     z = np.load(Path(args.cache_dir) / "features" / "train_features.npz", allow_pickle=True)
     Xva, yva, kva, rva = z["Xva"], z["yva"].astype(bool), z["kva"], z["rva"]
     countries = [str(c) for c in z["countries"]]
-    cfg = json.loads((Path(args.model_dir) / "config.json").read_text())
-    booster = lgb.Booster(model_file=str(Path(args.model_dir) / "lgbm.txt"))
+    mdir = Path(args.model_dir) if not args.v9 else Path(args.model_dir if args.model_dir != "models" else "models/v10")
+    cfg = json.loads((mdir / "config.json").read_text())
+    booster = lgb.Booster(model_file=str(mdir / "lgbm.txt"))
+    if args.v9:
+        from .augment import add_for_keys, country_frames
+        _, _, _, frames = country_frames(args.data_dir, "train", countries)
+        Xva = add_for_keys(Xva, kva, rva, countries, frames)
+        del frames
     p = booster.predict(Xva)
     ci = kva // KEY_S1
     thr = np.array([cfg.get("thresholds", {}).get(countries[c], cfg["threshold"]) for c in ci])
