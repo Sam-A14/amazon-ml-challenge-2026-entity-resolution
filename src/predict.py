@@ -29,7 +29,13 @@ def main():
     ap.add_argument("--model-dir", default="models")
     ap.add_argument("--output", default="output")
     ap.add_argument("--cache-dir", default="cache")
+    ap.add_argument("--feat-dir", default=None,
+                    help="save test candidates+features here; with --reuse-features load them "
+                         "(re-scoring with a new model then takes minutes)")
+    ap.add_argument("--reuse-features", action="store_true")
     args = ap.parse_args()
+    if args.feat_dir is None:                     # default: keep features next to the key cache
+        args.feat_dir = str(Path(args.cache_dir) / "features")
     t0 = time.time()
 
     cfg = json.loads((Path(args.model_dir) / "config.json").read_text(encoding="utf-8"))
@@ -47,20 +53,33 @@ def main():
         print(f"\n== {country}: S1={len(s1):,} S2+S3={len(rec):,}", flush=True)
         if len(s1) == 0 or len(rec) == 0:
             continue
-        cand = generate_candidates(s1, s2, s3, cfg["k"], cfg["m"],
-                                   max_df_dict(cfg["max_df"], cfg.get("max_df_pair", cfg["max_df"])),
-                                   cfg["chunk"], f"{args.cache_dir}/{args.split}_{safe(country)}",
-                                   rev_m=cfg.get("rev_m", 0))
+        ff = Path(args.feat_dir) / f"{args.split}_{safe(country)}.npz" if args.feat_dir else None
         tf = time.time()
-        X = build_features(cand, s1, rec)
+        if args.reuse_features and ff is not None and ff.exists():
+            z = np.load(ff)
+            s1i, rid, X = z["s1i"], z["rid"], z["X"]
+            print(f"  loaded saved candidates+features {ff}", flush=True)
+        else:
+            cand = generate_candidates(s1, s2, s3, cfg["k"], cfg["m"],
+                                       max_df_dict(cfg["max_df"], cfg.get("max_df_pair", cfg["max_df"])),
+                                       cfg["chunk"], f"{args.cache_dir}/{args.split}_{safe(country)}",
+                                       rev_m=cfg.get("rev_m", 0))
+            tf = time.time()
+            X = build_features(cand, s1, rec)
+            s1i, rid = cand["s1i"].to_numpy(), cand["rid"].to_numpy()
+            del cand
+            if ff is not None:
+                ff.parent.mkdir(parents=True, exist_ok=True)
+                np.savez(ff, s1i=s1i, rid=rid, X=X)
         prob = booster.predict(X)
-        acc = decide(cand["s1i"].to_numpy(), cand["rid"].to_numpy(), prob, cfg["threshold"])
-        a = s1["entity_id"].to_numpy()[cand["s1i"].to_numpy()]
-        b = rec["entity_id"].to_numpy()[cand["rid"].to_numpy()]
+        thr = cfg.get("thresholds", {}).get(str(country), cfg["threshold"])
+        acc = decide(s1i, rid, prob, thr)
+        a = s1["entity_id"].to_numpy()[s1i]
+        b = rec["entity_id"].to_numpy()[rid]
         cand_s1.append(a); cand_r.append(b); match_s1.append(a[acc]); match_r.append(b[acc])
-        print(f"  {len(cand):,} candidates ({len(cand) / len(s1):.2f}/S1), {acc.sum():,} matches, "
-              f"features+predict {time.time() - tf:.0f}s", flush=True)
-        del cand, X
+        print(f"  {s1i.size:,} candidates ({s1i.size / len(s1):.2f}/S1), {acc.sum():,} matches, "
+              f"threshold {thr:.3f}, features+predict {time.time() - tf:.0f}s", flush=True)
+        del X
 
     cat = lambda xs: np.concatenate(xs) if xs else np.array([], dtype=object)
     write_submission(args.output, s1_all["entity_id"].tolist(),

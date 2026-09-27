@@ -20,7 +20,7 @@ def decide(s1_key, r_key, prob, threshold):
     """Boolean mask of accepted pairs: prob >= threshold, and each S2/S3 record is given
     to at most one Source 1 entity (the most probable one). The one-owner rule follows from
     the training data: no S2/S3 record belongs to more than one Source 1 entity."""
-    keep = prob >= threshold
+    keep = prob >= threshold          # threshold: scalar or one value per pair
     idx = np.flatnonzero(keep)
     if idx.size:
         df = pd.DataFrame({"r": r_key[idx], "p": prob[idx], "i": idx})

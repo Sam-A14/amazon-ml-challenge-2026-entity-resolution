@@ -41,14 +41,44 @@ def main():
     ap.add_argument("--chunk", type=int, default=250)
     ap.add_argument("--cache-dir", default="cache")
     ap.add_argument("--rev-m", type=int, default=0, help="reverse search: S1s per S2/S3 record")
-    ap.add_argument("--n-train", type=int, default=150_000, help="train S1 entities per country")
+    ap.add_argument("--n-train", type=int, default=300_000, help="train S1 entities per country")
     ap.add_argument("--n-val", type=int, default=50_000, help="validation S1 entities per country")
     ap.add_argument("--countries", nargs="*", default=None)
     ap.add_argument("--model-dir", default="models")
     ap.add_argument("--note", default="")
+    ap.add_argument("--feat-dir", default=None,
+                    help="save train/val features here; with --reuse-features, load them instead "
+                         "of re-running blocking + features (model experiments in minutes)")
+    ap.add_argument("--reuse-features", action="store_true")
+    ap.add_argument("--rounds", type=int, default=4000)
+    ap.add_argument("--lr", type=float, default=0.05)
+    ap.add_argument("--leaves", type=int, default=127)
     args = ap.parse_args()
+    if args.feat_dir is None:                     # default: keep features next to the key cache
+        args.feat_dir = str(Path(args.cache_dir) / "features")
     t0 = time.time()
 
+    feat_file = Path(args.feat_dir) / "train_features.npz" if args.feat_dir else None
+    if args.reuse_features and feat_file is not None and feat_file.exists():
+        z = np.load(feat_file, allow_pickle=True)
+        Xtr, ytr, Xva, yva, kva, rva, ents, gold = (z[n] for n in (
+            "Xtr", "ytr", "Xva", "yva", "kva", "rva", "ents", "gold"))
+        countries = list(z["countries"])
+        block_stats = json.loads(str(z["block_stats"]))
+        print(f"loaded saved features from {feat_file}", flush=True)
+    else:
+        Xtr, ytr, ktr, rtr, Xva, yva, kva, rva, ents, gold, countries, block_stats = build(args)
+        if feat_file is not None:
+            feat_file.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(feat_file, Xtr=Xtr, ytr=ytr, ktr=ktr, rtr=rtr, Xva=Xva, yva=yva, kva=kva, rva=rva, ents=ents,
+                     gold=gold, countries=np.array(countries),
+                     block_stats=np.array(json.dumps(block_stats)))
+            print(f"saved features to {feat_file}", flush=True)
+    fit_and_save(args, Xtr, ytr, Xva, yva, kva, rva, ents, gold, countries, block_stats, t0)
+
+
+def build(args):
+    """Blocking + features for sampled train / validation S1 entities of every country."""
     s1_all, s2_all, s3_all = load_split(args.data_dir, "train")
     gt = load_ground_truth(args.data_dir)
     countries = args.countries or countries_of(s1_all, s2_all, s3_all)
@@ -101,24 +131,29 @@ def main():
 
     def stack(p):
         return [np.concatenate([x[i] for x in parts[p]]) for i in range(4)]
-    Xtr, ytr, _, _ = stack("train")
+    Xtr, ytr, ktr, rtr = stack("train")
     Xva, yva, kva, rva = stack("val")
     ents, gold = np.concatenate(val_entities), np.concatenate(val_gold)
-    print(f"\ntraining LightGBM on {len(ytr):,} pairs ({ytr.mean():.3f} positive)", flush=True)
+    return Xtr, ytr, ktr, rtr, Xva, yva, kva, rva, ents, gold, countries, block_stats
 
-    params = dict(objective="binary", learning_rate=0.05, num_leaves=127, min_data_in_leaf=100,
-                  feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1,
-                  num_threads=0, verbose=-1, seed=42)
+
+def fit_and_save(args, Xtr, ytr, Xva, yva, kva, rva, ents, gold, countries, block_stats, t0):
+    """LightGBM + global and per-country thresholds tuned on validation macro F0.5."""
+    print(f"\ntraining LightGBM on {len(ytr):,} pairs ({ytr.mean():.3f} positive)", flush=True)
+    params = dict(objective="binary", learning_rate=args.lr, num_leaves=args.leaves,
+                  min_data_in_leaf=100, feature_fraction=0.8, bagging_fraction=0.8,
+                  bagging_freq=1, num_threads=0, verbose=-1, seed=42)
     dtrain = lgb.Dataset(Xtr, ytr, feature_name=FEATURES)
     booster = lgb.train(params, dtrain,
-                        num_boost_round=2000,
+                        num_boost_round=args.rounds,
                         valid_sets=[lgb.Dataset(Xva, yva, feature_name=FEATURES, reference=dtrain)],
-                        callbacks=[lgb.early_stopping(50), lgb.log_evaluation(100)])
+                        callbacks=[lgb.early_stopping(100), lgb.log_evaluation(200)])
     pva = booster.predict(Xva, num_iteration=booster.best_iteration)
+    grid = np.arange(0.10, 0.96, 0.025)
 
     print("\nthreshold  macroF05  precision  recall", flush=True)
     best = (-1, 0.5)
-    for t in np.arange(0.10, 0.96, 0.025):
+    for t in grid:
         acc = decide(kva, rva, pva, t)
         f, p, r = macro_f05_fast(ents, gold, kva, yva, acc)
         print(f"  {t:.3f}   {f:.4f}   {p:.4f}   {r:.4f}")
@@ -129,11 +164,33 @@ def main():
     print(f"\nBEST validation macro F0.5 = {f:.4f} at threshold {t:.3f} "
           f"(precision {p:.4f}, recall {r:.4f}); blocking ceiling {ceiling:.4f}", flush=True)
 
+    # per-country thresholds (countries never seen in training fall back to the global one)
+    thresholds, row_c, ent_c = {}, kva // KEY_S1, ents // KEY_S1
+    for ci, country in enumerate(countries):
+        rm, em = row_c == ci, ent_c == ci
+        if not em.any():
+            continue
+        scores = [(macro_f05_fast(ents[em], gold[em], kva[rm], yva[rm],
+                                  decide(kva[rm], rva[rm], pva[rm], tt))[0], float(tt)) for tt in grid]
+        fc, tc = max(scores)
+        thresholds[str(country)] = tc
+        print(f"  {country}: best threshold {tc:.3f} -> macro F0.5 {fc:.4f}", flush=True)
+    t_row = np.array([thresholds.get(str(countries[c]), t) for c in row_c])
+    f_pc, p_pc, r_pc = macro_f05_fast(ents, gold, kva, yva, decide(kva, rva, pva, t_row))
+    print(f"PER-COUNTRY thresholds: validation macro F0.5 = {f_pc:.4f} "
+          f"(precision {p_pc:.4f}, recall {r_pc:.4f})", flush=True)
+    if f_pc <= f:
+        thresholds = {}                      # keep only if it actually helps
+        print("  per-country thresholds do not help; using the global threshold", flush=True)
+    else:
+        f, p, r = f_pc, p_pc, r_pc
+
     md = Path(args.model_dir); md.mkdir(parents=True, exist_ok=True)
     booster.save_model(str(md / "lgbm.txt"), num_iteration=booster.best_iteration)
-    cfg = dict(k=args.k, m=args.m, rev_m=args.rev_m, max_df=args.max_df, max_df_pair=args.max_df_pair, chunk=args.chunk, threshold=t,
+    cfg = dict(k=args.k, m=args.m, rev_m=args.rev_m, max_df=args.max_df,
+               max_df_pair=args.max_df_pair, chunk=args.chunk, threshold=t, thresholds=thresholds,
                features=FEATURES, val_macro_f05=f, val_precision=p, val_recall=r,
-               val_ceiling=ceiling, blocking=block_stats)
+               val_ceiling=ceiling, blocking=block_stats, best_iteration=booster.best_iteration)
     (md / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     imp = sorted(zip(FEATURES, booster.feature_importance("gain")), key=lambda x: -x[1])
     print("top features:", ", ".join(n for n, _ in imp[:12]))
@@ -148,7 +205,8 @@ def main():
         w.writerow([datetime.now().isoformat(timespec="minutes"), args.k, args.m, args.max_df, args.max_df_pair,
                     args.n_train, args.n_val, round(t, 3), round(f, 4), round(p, 4), round(r, 4),
                     round(ceiling, 4), block_stats, args.note])
-    print(f"saved {md}/lgbm.txt and config.json  (total {time.time() - t0:.0f}s)")
+    print(f"FINAL validation macro F0.5 = {f:.4f}  "
+          f"saved {md}/lgbm.txt and config.json  (total {time.time() - t0:.0f}s)")
 
 
 if __name__ == "__main__":
