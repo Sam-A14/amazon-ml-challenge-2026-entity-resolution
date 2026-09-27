@@ -8,7 +8,7 @@ real-world business. Outputs: `output/matching_results.tsv` (scored, macro F0.5)
 Per country (open set, France handled although unseen in training):
 1. **Blocking:** IDF-weighted hashed keys (name words, order-free name word pairs, address words,
    address word pairs, phonetic skeletons of names incl. Indian-script names transliterated to Latin),
-   sparse cosine retrieval in both directions: top-8 S2/S3 per S1, and top-2 S1 per S2/S3 record.
+   sparse cosine retrieval in both directions: top-10 S2/S3 per S1, and top-3 S1 per S2/S3 record.
 2. **Matching:** LightGBM (MIT licence) on string, competition, house-number-relationship and
    name-frequency features. No pretrained models, no external data or APIs.
 3. **Decision:** threshold tuned on validation macro F0.5; each S2/S3 record assigned to at most one
@@ -31,20 +31,20 @@ utils/validate_submission.py
 `--cache-dir` stores tokenised blocking keys and saved features (about 10 GB); use a drive with space.
 ~~~
 # 1. blocking + features on train, first LightGBM, saves train/val features   (~2.5 h)
-python -m src.train --data-dir dataset --k 8 --m 2 --rev-m 2 --n-train 300000 --cache-dir cache
+python -m src.train --data-dir dataset --k 10 --m 3 --rev-m 3 --n-train 300000 --rounds 50 --cache-dir cache
 
 # 2. blocking + features on test, saves test candidates/features               (~2.5 h)
 python -m src.predict --data-dir dataset --output output --cache-dir cache
 
 # 3. final model: adds house-number (+ name-frequency) features to the saved candidates,
 #    trains the final LightGBM, tunes the threshold, writes both output files  (~1 h)
-python -m src.augment --data-dir dataset --cache-dir cache --output output --baseline 0
+python -m src.augment --data-dir dataset --cache-dir cache --output output --baseline 0 --model-dir models/v12
 
 # 4. official format check
 python utils/validate_submission.py --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv --test-dir dataset/test
 ~~~
-Step 3 as written reproduces the submitted **v10** model (house-number + name-frequency features).
-Add `--no-name-freq --model-dir models/v9` to reproduce v9 instead.
+These commands reproduce the submitted **v12** (final) outputs. For v10 (smaller candidate set, 12.4 per S1,
+leaderboard 0.967) use `--k 8 --m 2 --rev-m 2` in step 1; add `--no-name-freq` in step 3 for v9.
 
 ## Project structure
 ~~~
@@ -63,5 +63,5 @@ experiments/                    blocking_results.txt, experiment_log.csv
 ~~~
 
 ## Results (public leaderboard, macro F0.5)
-v1 0.813 → v3 0.925 → v6 0.953 → v9 0.964 → **v10 0.967** (validation 0.9727, final submission). Details in `Documentation_template.md`.
+v1 0.813 → v3 0.925 → v6 0.953 → v9 0.964 → v10 0.967 → **v12 0.968** (validation 0.9741, final submission). Details in `Documentation_template.md`.
 Random seeds are fixed (split seed 42 + country index, LightGBM seed 42).

@@ -11,12 +11,12 @@ We solve entity resolution as **blocking → pairwise classification → constra
 separately per country so it generalises to a country unseen in training (France). Blocking combines
 IDF-weighted hashed word / word-pair keys, a rule-based **Indian-script transliteration + phonetic
 skeleton**, and **bidirectional search** (each Source 1 record retrieves its top candidates *and* each
-Source 2/3 record retrieves its own best Source 1 records), giving ~12 candidates per Source 1 record
-with a 0.985 macro-F0.5 ceiling. A LightGBM classifier (MIT licence; no pretrained models, no external
+Source 2/3 record retrieves its own best Source 1 records), giving ~19 candidates per Source 1 record
+with a 0.9875 macro-F0.5 ceiling. A LightGBM classifier (MIT licence; no pretrained models, no external
 data) scores pairs with string, competition, **house-number-relationship** and name-frequency features;
 matches are accepted above a threshold tuned on the official macro F0.5 and each Source 2/3 record is
 assigned to at most one Source 1 entity. Every change was driven by measured error analysis:
-public leaderboard 0.813 → 0.925 → 0.953 → 0.964 → **0.967** (validation macro F0.5 0.9727).
+public leaderboard 0.813 → 0.925 → 0.953 → 0.964 → 0.967 → **0.968** (validation macro F0.5 0.9741).
 
 ---
 
@@ -60,18 +60,20 @@ dataset's rule separating "same business, noisy number" from "different business
   keys are only added to Source 1 (queries) and to Indian-script S2/S3 names, so ordinary candidates
   keep an undiluted representation.
 - **Weighting:** IDF per key kind within the country (keys seen once or > 5,000 times dropped), L2 norm.
-- **Retrieval:** sparse cosine in row chunks. Forward: top-8 S2 and top-8 S3 per S1 (kept if the pair
-  is among the S2/S3 record's top-2 S1). Reverse: every S2/S3 record's top-2 S1 records. The union is
+- **Retrieval:** sparse cosine in row chunks. Forward: top-10 S2 and top-10 S3 per S1 (kept if the
+  pair is among the S2/S3 record's top-3 S1). Reverse: every S2/S3 record's top-3 S1 records. The union is
   the final candidate set, exactly what the model scores (`candidate_pairs.tsv`).
-- **Candidate pairs generated (test):** 21,536,072 (France 3.05M, India 10.20M, US 8.28M), about 12.4
-  per S1 record; only 457 of 1,732,544 S1 records have no candidate.
+- **Candidate pairs generated (test):** 32,633,478 (France 4.61M, India 15.46M, US 12.57M), about 18.8
+  per S1 record. The narrower v10 setting (top-8 / top-2) gives 21,536,072 pairs (12.4 per S1) for a
+  0.001 lower leaderboard score (0.967 vs 0.968), a candidate-size vs accuracy trade-off we report openly.
 - **How we ensured true matches were not lost:** every change was measured on training data:
 
 | Blocking version | India recall | US recall | Cands / S1 | Macro-F0.5 ceiling |
 |---|---|---|---|---|
 | v1 single words, df cap 1,000 | 0.656 | 0.678 | ~6 | 0.815 |
 | v3 + word pairs, df cap 5,000 | 0.887 | 0.923 | ~7 | 0.963 |
-| **v6 + transliteration/skeleton + reverse search** | **0.948** | **0.966** | ~10 | **0.985** |
+| v6 + transliteration/skeleton + reverse search (k=8, top-2) | 0.948 | 0.966 | ~10 | 0.985 |
+| **v12: wider search (k=10, reverse top-3)** | **0.955** | **0.972** | ~15.5 | **0.9875** |
 
   Diagnostics that drove v6: 81% of v3's missed India pairs were "crowded out" of the forward top-8
   (fixed by reverse search) and 19% shared no key, almost all Indian-script names (fixed by
@@ -95,7 +97,7 @@ dataset's rule separating "same business, noisy number" from "different business
 
 **Model type:** LightGBM binary classifier (MIT), 127 leaves, learning rate 0.05, feature and bagging
 fraction 0.8; best iteration selected on validation macro F0.5.  
-**Training data:** candidates of 300k S1 entities per training country (6.1M pairs); a disjoint set of
+**Training data:** candidates of 300k S1 entities per training country (9.3M pairs with the final blocking); a disjoint set of
 50k S1 entities per country is held out for validation (entity-level split).  
 **Threshold selection:** grid search maximising the official macro F0.5 on validation (singletons and
 blocking misses included) after the one-owner rule (each S2/S3 record goes to its most probable S1 only).
@@ -111,10 +113,13 @@ blocking misses included) after the one-owner rule (each S2/S3 record goes to it
 | v6 | transliteration + reverse search | 0.9648 | 0.9894 | 0.9261 | 0.953 |
 | v7 | 2× training data (not submitted) | 0.9608 | 0.9879 | 0.9193 | — |
 | v9 | house-number relationship features | 0.9707 | 0.9929 | 0.9342 | 0.964 |
-| **v10 (final)** | **+ name-frequency features** | **0.9727** | **0.9940** | **0.9371** | **0.967** |
+| v10 | + name-frequency features | 0.9727 | 0.9940 | 0.9371 | 0.967 |
 | v11 | second-stage (stacked) model on v10 features (not submitted) | 0.9729 | — | — | — |
+| **v12 (final)** | **wider blocking (k=10, reverse top-3) + v10 model** | **0.9741** | **0.9942** | **0.9398** | **0.968** |
 
-- **F_0.5 Score (macro):** 0.9727 validation / 0.967 public leaderboard (v10, final submission).
+- **F_0.5 Score (macro):** 0.9741 validation / 0.968 public leaderboard (v12, final submission).
+- **Decision rule check:** a per-entity expected-F0.5 decision rule was also evaluated on validation
+  and automatically rejected because the tuned global threshold (0.725) scored higher.
 - **Model errors on validation (v7 → v9 → v10):** rejected true pairs 13,113 → 7,938 → 6,926;
   wrong merges accepted 3,889 → 2,315 → 1,963. The stacked second stage (v11) added only +0.0002
   and was not submitted.
