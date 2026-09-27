@@ -24,7 +24,7 @@ import pandas as pd
 
 from .data_loader import countries_of, load_split
 from .eval_blocking import safe
-from .evaluation import decide, macro_f05_fast
+from .evaluation import decide, decide_expected_f, macro_f05_fast
 from .features import FEATURES
 from .normalize import clean_tokens
 from .submission import write_submission
@@ -188,6 +188,16 @@ def main():
                 best = (f, it, float(t), pr, rc)
         print(f"  iteration {it}: best so far F0.5 {best[0]:.4f}", flush=True)
     f, it, t, pr, rc = best
+    # alternative decision rule: per-entity expected-F0.5 optimisation (kept only if better)
+    rule = {"type": "threshold", "threshold": t}
+    pbest = booster.predict(Xva, num_iteration=it)
+    for c in (0.0, 0.1, 0.2, 0.35, 0.5):
+        for pmin in (0.05, 0.1, 0.2, 0.3):
+            fe, pe, re_ = macro_f05_fast(ents, gold, kva, yva, decide_expected_f(kva, rva, pbest, c, pmin))
+            if fe > f:
+                f, pr, rc = fe, pe, re_
+                rule = {"type": "expected_f", "c": c, "pmin": pmin}
+    print(f"decision rule chosen on validation: {rule}", flush=True)
     imp = sorted(zip(names, booster.feature_importance("gain")), key=lambda x: -x[1])
     print(f"\nV10 validation macro F0.5 = {f:.4f} (precision {pr:.4f}, recall {rc:.4f}) "
           f"at iteration {it}, threshold {t:.3f}; baseline {args.baseline:.4f}")
@@ -196,7 +206,7 @@ def main():
 
     md = Path(args.model_dir); md.mkdir(parents=True, exist_ok=True)
     booster.save_model(str(md / "lgbm.txt"), num_iteration=it)
-    (md / "config.json").write_text(json.dumps(dict(threshold=t, iteration=it, val_macro_f05=f,
+    (md / "config.json").write_text(json.dumps(dict(threshold=t, rule=rule, iteration=it, val_macro_f05=f,
         val_precision=pr, val_recall=rc, features=names), indent=2))
     if f <= args.baseline:
         print("v10 does NOT beat the baseline -> not writing test predictions")
@@ -219,7 +229,10 @@ def main():
                                                rec["business_address"].to_numpy(), s1i, rid,
                                                None if args.no_name_freq else nc)])
         prob = booster.predict(X, num_iteration=it)
-        acc = decide(s1i, rid, prob, t)
+        if rule["type"] == "expected_f":
+            acc = decide_expected_f(s1i, rid, prob, rule["c"], rule["pmin"])
+        else:
+            acc = decide(s1i, rid, prob, t)
         a = s1["entity_id"].to_numpy()[s1i]
         b = rec["entity_id"].to_numpy()[rid]
         cand_s1.append(a); cand_r.append(b); match_s1.append(a[acc]); match_r.append(b[acc])
