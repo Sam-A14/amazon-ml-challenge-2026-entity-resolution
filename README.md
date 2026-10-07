@@ -1,4 +1,8 @@
-﻿# Business Entity Resolution - Amazon ML Challenge 2026 (Team Bravo)
+﻿> **Amazon ML Challenge 2026 – Team Bravo.** Final public leaderboard macro F0.5 **0.968**
+> (from a 0.813 baseline) on 24M business records across 3 sources and an unseen country,
+> using a CPU-only pipeline: bidirectional blocking, Indian-script transliteration,
+> house-number relationship features and LightGBM.
+# Business Entity Resolution - Amazon ML Challenge 2026 (Team Bravo)
 
 For every Source 1 business record, find all Source 2 / Source 3 records describing the same
 real-world business. Outputs: `output/matching_results.tsv` (scored, macro F0.5) and
@@ -65,3 +69,4 @@ experiments/                    blocking_results.txt, experiment_log.csv
 ## Results (public leaderboard, macro F0.5)
 v1 0.813 → v3 0.925 → v6 0.953 → v9 0.964 → v10 0.967 → **v12 0.968** (validation 0.9741, final submission). Details in `Documentation_template.md`.
 Random seeds are fixed (split seed 42 + country index, LightGBM seed 42).
+
